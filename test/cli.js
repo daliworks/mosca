@@ -1,4 +1,4 @@
-var async = require("async");
+var steed = require("steed");
 var tmp = require('tmp');
 var fs = require("fs");
 var mqtt = require("mqtt");
@@ -21,11 +21,11 @@ describe("mosca.cli", function() {
   });
 
   afterEach(function(done) {
-    async.parallel(servers.map(function(s) {
-      return function(cb) {
-        s.close(cb);
-      };
-    }), function() {
+    var count = 0;
+    steed.each(servers, function(s, cb) {
+      count++;
+      s.close(cb);
+    }, function() {
       done();
     });
   });
@@ -36,7 +36,7 @@ describe("mosca.cli", function() {
         servers.unshift(server);
         callback(server);
       }
-      done(err);
+      setImmediate(done.bind(null, err));
     });
   };
 
@@ -48,45 +48,6 @@ describe("mosca.cli", function() {
     startServer(done, function(server) {
       expect(server).to.be.instanceOf(mosca.Server);
     });
-  });
-
-  it("should create a bunyan logger", function(done) {
-    args.push("-v");
-    var s = startServer(done, function(server) {
-      expect(server.logger).to.exist;
-    });
-
-    if (s.logger) {
-      s.logger.streams.pop();
-    }
-  });
-
-  it("should set the logging level to 40", function(done) {
-    startServer(done, function(server) {
-      expect(server.logger.level()).to.equal(40);
-    });
-  });
-
-  it("should support a verbose option by setting the bunyan level to 30", function(done) {
-    args.push("-v");
-    var s = startServer(done, function(server) {
-      expect(server.logger.level()).to.equal(30);
-    });
-
-    if (s.logger) {
-      s.logger.streams.pop();
-    }
-  });
-
-  it("should support a very verbose option by setting the bunyan level to 20", function(done) {
-    args.push("--very-verbose");
-    var s = startServer(done, function(server) {
-      expect(server.logger.level()).to.equal(20);
-    });
-
-    if (s.logger) {
-      s.logger.streams.pop();
-    }
   });
 
   it("should support a port flag", function(done) {
@@ -151,20 +112,6 @@ describe("mosca.cli", function() {
       expect(server.opts).to.have.property("port", 2883);
       expect(server.opts).to.have.deep.property("backend.port", 3833);
     });
-  });
-
-  it("should create necessary default options even if not specified in config file", function(done) {
-    args.push("-c");
-    args.push(process.cwd() + "/test/sample_config.js");
-    args.push("-v");
-
-    var s = startServer(done, function(server) {
-      expect(server.opts).to.have.deep.property("logger.name", "mosca");
-    });
-
-    if (s.logger) {
-      s.logger.streams.pop();
-    }
   });
 
   it("should add an user to an authorization file", function(done) {
@@ -263,15 +210,15 @@ describe("mosca.cli", function() {
   it("should support authorizing an authorized client", function(done) {
     args.push("--credentials");
     args.push("test/credentials.json");
-    async.waterfall([
+    steed.waterfall([
       function(cb) {
         mosca.cli(args, cb);
       },
       function(server, cb) {
         servers.unshift(server);
 
-        var options = { username: "test", password: "test" };
-        var client = mqtt.createClient(1883, "localhost", options);
+        var options = { username: "test", password: "test", port: 1883 };
+        var client = mqtt.connect(options);
         client.on("error", cb);
         client.on("connect", function() {
           cb(null, client);
@@ -293,14 +240,14 @@ describe("mosca.cli", function() {
   it("should support negating an unauthorized client", function(done) {
     args.push("--credentials");
     args.push("test/credentials.json");
-    async.waterfall([
+    steed.waterfall([
       function(cb) {
         mosca.cli(args, cb);
       },
       function(server, cb) {
         servers.unshift(server);
-        var options = { username: "bad", password: "bad" };
-        var client = mqtt.createClient(1883, "localhost", options);
+        var options = { port: 1883, username: "bad", password: "bad" };
+        var client = mqtt.connect(options);
         client.on("error", cb);
         client.on("connect", function() {
           cb(null, client);
@@ -330,7 +277,7 @@ describe("mosca.cli", function() {
 
     var cloned = null;
 
-    async.waterfall([
+    steed.waterfall([
       function(cb) {
         tmp.file(cb);
       },
@@ -356,8 +303,8 @@ describe("mosca.cli", function() {
         setTimeout(cb, 50);
       },
       function(cb) {
-        var options = { username: "myuser", password: "mypass" };
-        var client = mqtt.createClient(1883, "localhost", options);
+        var options = { port: 1883, username: "myuser", password: "mypass" };
+        var client = mqtt.connect(options);
         client.once("error", cb);
         client.once("connect", function() {
           client.once("close", cb);

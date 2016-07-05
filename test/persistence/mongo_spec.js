@@ -4,9 +4,11 @@ var abstract = require("./abstract");
 var Mongo = require("../../").persistence.Mongo;
 var MongoClient = require('mongodb').MongoClient;
 var clean = require("mongo-clean");
-var async = require("async");
+var steed = require("steed");
 
 describe("mosca.persistence.Mongo", function() {
+
+  this.timeout(4000);
 
   var opts = {
     url: "mongodb://localhost:27017/moscatests",
@@ -17,7 +19,7 @@ describe("mosca.persistence.Mongo", function() {
     }
   };
 
-  before(function(done) {
+  before(function connect(done) {
     // Connect to the db
     MongoClient.connect(opts.url, { safe: true }, function(err, db) {
       opts.connection = db;
@@ -25,7 +27,7 @@ describe("mosca.persistence.Mongo", function() {
     });
   });
 
-  beforeEach(function(done) {
+  beforeEach(function cleanDB(done) {
     clean(opts.connection, done);
   });
 

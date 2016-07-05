@@ -1,5 +1,4 @@
-var async = require("async");
-var mqtt = require("mqtt");
+var steed = require("steed");
 var ascoltatori = require("ascoltatori");
 
 module.exports = function(moscaSettings, createConnection) {
@@ -10,6 +9,7 @@ module.exports = function(moscaSettings, createConnection) {
   beforeEach(function(done) {
     settings = moscaSettings();
     settings.publishNewClient = false;
+    settings.publishClientDisconnect = false;
     instance = new mosca.Server(settings, done);
     this.instance = instance;
     this.settings = settings;
@@ -23,7 +23,7 @@ module.exports = function(moscaSettings, createConnection) {
       instances.push(secondInstance);
     }
 
-    async.each(instances, function(instance, cb) {
+    steed.each(instances, function(instance, cb) {
       instance.close(cb);
     }, function() {
       setImmediate(done);
@@ -56,7 +56,7 @@ module.exports = function(moscaSettings, createConnection) {
       client.connect(opts);
 
       client.on('connack', function(packet) {
-        callback(client);
+        callback(client, packet);
       });
     });
   }
@@ -67,6 +67,7 @@ module.exports = function(moscaSettings, createConnection) {
 
     settings = moscaSettings();
     settings.publishNewClient = true;
+    settings.publishClientDisconnect = false;
 
     function verify() {
       if (connectedClient && publishedClientId) {
@@ -78,7 +79,7 @@ module.exports = function(moscaSettings, createConnection) {
     secondInstance = new mosca.Server(settings, function(err, server) {
       server.on("published", function(packet, clientId) {
         expect(packet.topic).to.be.equal("$SYS/" + secondInstance.id + "/new/clients");
-        publishedClientId = packet.payload;
+        publishedClientId = packet.payload.toString();
         verify();
       });
 
@@ -89,10 +90,39 @@ module.exports = function(moscaSettings, createConnection) {
     });
   });
 
+  it("should publish disconnected client to '$SYS/{broker-id}/disconnect/clients'", function(done) {
+    var connectedClient = null,
+        publishedClientId = null;
+
+    settings = moscaSettings();
+    settings.publishNewClient = false;
+    settings.publishClientDisconnect = true;
+
+    function verify() {
+      if (connectedClient && publishedClientId) {
+        expect(publishedClientId).to.be.equal(connectedClient.opts.clientId);
+        done();
+      }
+    }
+
+    secondInstance = new mosca.Server(settings, function(err, server) {
+      server.on("published", function(packet, clientId) {
+        expect(packet.topic).to.be.equal("$SYS/" + secondInstance.id + "/disconnect/clients");
+        publishedClientId = packet.payload.toString();
+        verify();
+      });
+
+      buildAndConnect(function(){}, function(client) {
+        connectedClient = client;
+        connectedClient.disconnect();
+      });
+    });
+  });
+
   it("should publish each subscribe to '$SYS/{broker-id}/new/subscribes'", function(done) {
-    var d = donner(2, done),
-      connectedClient = null,
-      publishedClientId = null;
+    var d = donner(2, done);
+    var connectedClient = null;
+    var publishedClientId = null;
 
     function verify() {
       if (connectedClient && publishedClientId) {
@@ -100,12 +130,6 @@ module.exports = function(moscaSettings, createConnection) {
         d();
       }
     }
-
-    instance.on("published", function(packet) {
-      expect(packet.topic).to.be.equal("$SYS/" + instance.id + "/new/subscribes");
-      publishedClientId = packet.payload;
-      verify();
-    });
 
     buildAndConnect(d, function(client) {
       var messageId = Math.floor(65535 * Math.random());
@@ -117,7 +141,12 @@ module.exports = function(moscaSettings, createConnection) {
 
       connectedClient = client;
 
-      client.on("suback", function(packet) {
+      instance.once("published", function(packet) {
+        expect(packet.topic).to.be.equal("$SYS/" + instance.id + "/new/subscribes");
+        var payload = JSON.parse( packet.payload.toString() );
+        publishedClientId = payload.clientId;
+        expect(payload.topic).to.be.equal('hello');
+        verify();
         client.disconnect();
       });
 
@@ -127,6 +156,55 @@ module.exports = function(moscaSettings, createConnection) {
       });
     });
 
+  });
+
+  it("should publish each unsubscribe to '$SYS/{broker-id}/new/unsubscribes'", function(done) {
+    var d = donner(2, done),
+        connectedClient = null,
+        publishedClientId = null;
+
+    function verify() {
+      if (connectedClient && publishedClientId) {
+        expect(publishedClientId).to.be.equal(connectedClient.opts.clientId);
+        d();
+      }
+    }
+
+    buildAndConnect(d, function(client) {
+      var messageId = Math.floor(65535 * Math.random());
+      var subscriptions = [{
+        topic: "hello",
+        qos: 1
+      }];
+
+      connectedClient = client;
+
+      instance.once("published", function(packet) {
+
+        expect(packet.topic).to.be.equal("$SYS/" + instance.id + "/new/subscribes");
+
+        client.unsubscribe({
+          unsubscriptions: ["hello"],
+          messageId: messageId
+        });
+
+        instance.once("published", function(packet) {
+
+          expect(packet.topic).to.be.equal("$SYS/" + instance.id + "/new/unsubscribes");
+          var payload = JSON.parse( packet.payload.toString() );
+          expect(payload.topic).to.be.equal('hello');
+          publishedClientId = payload.clientId;
+          verify();
+
+          client.disconnect();
+        });
+      });
+
+      client.subscribe({
+        subscriptions: subscriptions,
+        messageId: messageId
+      });
+    });
   });
 
   describe("multi mosca servers", function() {
@@ -139,7 +217,7 @@ module.exports = function(moscaSettings, createConnection) {
       instances.push(serverOne);
       instances.push(serverTwo);
 
-      async.each(instances, function(instance, cb) {
+      steed.each(instances, function(instance, cb) {
         if (instance) {
           instance.close(cb);
         } else {
@@ -166,10 +244,11 @@ module.exports = function(moscaSettings, createConnection) {
 
       settingsOne.backend = settingsTwo.backend = settings.backend;
 
-      async.series([
+      steed.series([
         function(cb) {
           serverOne = new mosca.Server(settingsOne, function(err, server) {
-            serverOne.on('clientDisconnected', function(serverClient) {
+            serverOne.on('clientDisconnected', function(serverClient, reason) {
+              expect(reason).to.be.equal('new connection request');
               expect(serverClient).not.to.be.equal(undefined);
               done();
             });
@@ -303,7 +382,7 @@ module.exports = function(moscaSettings, createConnection) {
     var d = donner(2, done);
     var opts = buildOpts(), clientId = "123456789";
     opts.clientId = clientId;
-    async.waterfall([
+    steed.waterfall([
       function(cb) {
         buildAndConnect(d, opts, function(client1) {
           cb(null, client1);
@@ -316,6 +395,42 @@ module.exports = function(moscaSettings, createConnection) {
         });
       }
     ]);
+  });
+
+  it("should generate a random clientId if none is supplied by the client and protocol is 3.1.1", function(done) {
+
+    var connectedClient = null,
+        publishedClientId = null,
+        opts = {
+          keepalive: 1000,
+          clientId: '',
+          protocolId: 'MQTT',
+          protocolVersion: 4
+        };
+
+    settings = moscaSettings();
+    settings.publishNewClient = true;
+    settings.publishClientDisconnect = false;
+
+    function verify() {
+      if (connectedClient && publishedClientId) {
+        expect(publishedClientId).to.be.ok;
+        connectedClient.disconnect();
+      }
+    }
+
+    secondInstance = new mosca.Server(settings, function(err, server) {
+      server.on("published", function(packet, clientId) {
+        expect(packet.topic).to.be.equal("$SYS/" + secondInstance.id + "/new/clients");
+        publishedClientId = packet.payload.toString();
+        verify();
+      });
+
+      buildAndConnect(done, opts, function(client) {
+        connectedClient = client;
+        verify();
+      });
+    });
   });
 
   it("should send a pingresp when it receives a pingreq", function(done) {
@@ -419,7 +534,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client1.on("publish", function(packet) {
         expect(packet.topic).to.be.equal("hello");
-        expect(packet.payload).to.be.equal("some data");
+        expect(packet.payload.toString()).to.be.equal("some data");
         client1.disconnect();
       });
 
@@ -456,7 +571,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client1.on("publish", function(packet) {
         expect(packet.topic).to.be.equal("hello");
-        expect(packet.payload.length).to.be.equal(bigPayload.length);
+        expect(packet.payload.toString().length).to.be.equal(bigPayload.length);
         client1.disconnect();
       });
 
@@ -653,7 +768,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       instance.on("published", function(packet, serverClient) {
         expect(packet.topic).to.be.equal("hello");
-        expect(packet.payload.toString()).to.be.equal("some data");
+        expect(packet.payload.toString().toString()).to.be.equal("some data");
         expect(serverClient.id).to.be.equal(clientId);
         client.disconnect();
       });
@@ -665,6 +780,43 @@ module.exports = function(moscaSettings, createConnection) {
     });
   });
 
+  it("should emit an event for puback of each published packet", function(done) {
+    buildAndConnect(done, function(client) {
+
+      var clientId = client.opts.clientId;
+      var messageId = Math.floor(65535 * Math.random());
+
+      var subscriptions = [{
+        topic: "delivery",
+        qos: 1
+      }];
+
+      instance.on("delivered", function(packet, serverClient) {
+        expect(packet.topic).to.be.equal("delivery");
+        expect(packet.payload.toString().toString()).to.be.equal("some data");
+        expect(serverClient.id).to.be.equal(clientId);
+        client.disconnect();
+      });
+
+      instance.on("subscribed", function(topic, serverClient) {
+        instance.publish({
+          topic: "delivery",
+          payload: "some data",
+          qos: 1
+        });
+      });
+
+      client.on("publish", function(packet){
+        client.puback({ messageId: packet.messageId });
+      });
+      client.subscribe({
+        subscriptions: subscriptions,
+        messageId: messageId
+      });
+
+    });
+  });
+
   it("should call onPublished on every newly published packet", function(done) {
     var onPublishedCalled = false;
     var clientId;
@@ -673,7 +825,7 @@ module.exports = function(moscaSettings, createConnection) {
       onPublishedCalled = true;
 
       expect(packet.topic).to.be.equal("hello");
-      expect(packet.payload.toString()).to.be.equal("some data");
+      expect(packet.payload.toString().toString()).to.be.equal("some data");
       expect(serverClient.id).to.be.equal(clientId);
 
       callback();
@@ -711,7 +863,8 @@ module.exports = function(moscaSettings, createConnection) {
   it("should emit an event when a client is disconnected", function(done) {
     var client = createConnection(settings.port, settings.host);
 
-    instance.on('clientDisconnected', function(serverClient) {
+    instance.on('clientDisconnected', function(serverClient, reason) {
+      expect(reason).to.be.equal('disconnect request');
       expect(serverClient).not.to.be.equal(undefined);
       done();
     });
@@ -737,7 +890,9 @@ module.exports = function(moscaSettings, createConnection) {
     client.on('connack', function() {
       client.disconnect();
       client.disconnect();
-      client.stream.end();
+      setImmediate(function() {
+        client.stream.end();
+      });
     });
 
     client.connect(buildOpts());
@@ -746,7 +901,8 @@ module.exports = function(moscaSettings, createConnection) {
   it("should emit an event when a client is disconnected without a disconnect", function(done) {
     var client = createConnection(settings.port, settings.host);
 
-    instance.on('clientDisconnected', function(serverClient) {
+    instance.on('clientDisconnected', function(serverClient, reason) {
+      expect(reason).to.be.equal('close');
       expect(serverClient).not.to.be.equal(undefined);
       done();
     });
@@ -762,7 +918,7 @@ module.exports = function(moscaSettings, createConnection) {
 
   it("should emit a ready and closed events", function(done) {
     var server = new mosca.Server(moscaSettings());
-    async.series([
+    steed.series([
 
       function(cb) {
         server.on("ready", cb);
@@ -781,7 +937,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client1.on("publish", function(packet) {
         expect(packet.topic).to.be.equal("hello/world");
-        expect(packet.payload).to.be.equal("some data");
+        expect(packet.payload.toString()).to.be.equal("some data");
         client1.disconnect();
       });
 
@@ -814,7 +970,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client1.on("publish", function(packet) {
         expect(packet.topic).to.be.equal("hello/world");
-        expect(packet.payload).to.be.equal("some data");
+        expect(packet.payload.toString()).to.be.equal("some data");
         client1.disconnect();
       });
 
@@ -846,7 +1002,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client1.on("publish", function(packet) {
         expect(packet.topic).to.be.equal("hello/foo/world/bar");
-        expect(packet.payload).to.be.equal("some data");
+        expect(packet.payload.toString()).to.be.equal("some data");
         client1.disconnect();
       });
 
@@ -876,7 +1032,7 @@ module.exports = function(moscaSettings, createConnection) {
   it("should support unsubscribing a single client", function(done) {
     var d = donner(3, done);
 
-    async.waterfall([
+    steed.waterfall([
 
       function(cb) {
         buildAndConnect(d, function(client1) {
@@ -1093,7 +1249,7 @@ module.exports = function(moscaSettings, createConnection) {
 
   it("should support will message", function(done) {
 
-    async.waterfall([
+    steed.waterfall([
 
       function(cb) {
         var client = createConnection(settings.port, settings.host);
@@ -1153,7 +1309,7 @@ module.exports = function(moscaSettings, createConnection) {
         });
         client3.on("publish", function(packet) {
           expect(packet.topic).to.be.eql("hello/died");
-          expect(packet.payload).to.be.eql("client1 died");
+          expect(packet.payload.toString()).to.be.eql("client1 died");
           client3.disconnect();
         });
       }
@@ -1272,7 +1428,7 @@ module.exports = function(moscaSettings, createConnection) {
     };
 
     instance.on("published", function(packet) {
-      expect(packet.payload.toString()).to.be.equal("rewritten");
+      expect(packet.payload.toString().toString()).to.be.equal("rewritten");
     });
 
     buildAndConnect(done, function(client) {
@@ -1341,7 +1497,7 @@ module.exports = function(moscaSettings, createConnection) {
 
     instance.on('published', function(packet) {
       expect(packet.topic).to.be.eql("hello");
-      expect(packet.payload.toString()).to.be.eql("world");
+      expect(packet.payload.toString().toString()).to.be.eql("world");
       done();
     });
   });
@@ -1498,7 +1654,7 @@ module.exports = function(moscaSettings, createConnection) {
 
   it("should support retained messages", function(done) {
 
-    async.waterfall([
+    steed.waterfall([
 
       function(cb) {
         var client = createConnection(settings.port, settings.host);
@@ -1547,7 +1703,7 @@ module.exports = function(moscaSettings, createConnection) {
 
           client.on("publish", function(packet) {
             expect(packet.topic).to.be.eql("hello");
-            expect(packet.payload.toString()).to.be.eql("world world");
+            expect(packet.payload.toString().toString()).to.be.eql("world world");
             client.stream.end();
           });
 
@@ -1561,7 +1717,7 @@ module.exports = function(moscaSettings, createConnection) {
 
   it("should return only a single retained message", function(done) {
 
-    async.waterfall([
+    steed.waterfall([
 
       function(cb) {
         buildClient(cb, function(client) {
@@ -1648,10 +1804,14 @@ module.exports = function(moscaSettings, createConnection) {
     opts.clientId = "mosca-unclean-clients-test";
     opts.clean = false;
 
-    async.series([
+    steed.series([
 
       function(cb) {
-        buildAndConnect(cb, opts, function(client) {
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // sessionPresent must be false
+          expect(connack.sessionPresent).to.be.eql(false);
+
           var subscriptions = [{
             topic: "hello",
             qos: 1
@@ -1669,7 +1829,11 @@ module.exports = function(moscaSettings, createConnection) {
       },
 
       function(cb) {
-        buildAndConnect(cb, opts, function(client) {
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // reconnection sessionPresent must be true
+          expect(connack.sessionPresent).to.be.eql(true);
+
           client.publish({
             topic: "hello",
             qos: 1,
@@ -1679,7 +1843,7 @@ module.exports = function(moscaSettings, createConnection) {
 
           client.on("publish", function(packet) {
             expect(packet.topic).to.be.eql("hello");
-            expect(packet.payload).to.be.eql("world");
+            expect(packet.payload.toString()).to.be.eql("world");
             expect(packet.qos).to.be.eql(1);
             client.disconnect();
           });
@@ -1694,10 +1858,14 @@ module.exports = function(moscaSettings, createConnection) {
     opts.clientId = "mosca-unclean-client-test";
     opts.clean = false;
 
-    async.series([
+    steed.series([
 
       function(cb) {
-        buildAndConnect(cb, opts, function(client) {
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // sessionPresent must be false
+          expect(connack.sessionPresent).to.be.eql(false);
+
           var subscriptions = [{
             topic: "hello",
             qos: 1
@@ -1715,7 +1883,11 @@ module.exports = function(moscaSettings, createConnection) {
       },
 
       function(cb) {
-        buildAndConnect(cb, buildOpts(), function(client) {
+        buildAndConnect(cb, buildOpts(), function(client, connack) {
+
+          // buildOpts create new id, so is new session, sessionPresent must be false
+          expect(connack.sessionPresent).to.be.eql(false);
+
           client.publish({
             topic: "hello",
             qos: 1,
@@ -1729,12 +1901,83 @@ module.exports = function(moscaSettings, createConnection) {
       },
 
       function(cb) {
-        buildAndConnect(cb, opts, function(client) {
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // reconnection sessionPresent must be true
+          expect(connack.sessionPresent).to.be.eql(true);
+
           client.on("publish", function(packet) {
             expect(packet.topic).to.be.eql("hello");
-            expect(packet.payload).to.be.eql("world");
+            expect(packet.payload.toString()).to.be.eql("world");
             client.disconnect();
           });
+        });
+      }
+    ], done);
+  });
+
+  it("cleanSession = false, on reconnect cleanSession = true", function(done) {
+    var opts = buildOpts();
+
+    opts.clientId = "mosca-unclean-client-test";
+
+    steed.series([
+
+      function(cb) {
+        opts.clean = false;
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // sessionPresent must be false
+          expect(connack.sessionPresent).to.be.eql(false);
+
+          var subscriptions = [{
+            topic: "hello",
+            qos: 1
+          }];
+
+          client.subscribe({
+            subscriptions: subscriptions,
+            messageId: 42
+          });
+
+          client.on("suback", function() {
+            client.stream.end();
+          });
+        });
+      },
+
+      function(cb) {
+        buildAndConnect(cb, buildOpts(), function(client, connack) {
+
+          // buildOpts create new id, so is new session, sessionPresent must be false
+          expect(connack.sessionPresent).to.be.eql(false);
+
+          client.publish({
+            topic: "hello",
+            qos: 1,
+            payload: "world",
+            messageId: 24
+          });
+          client.on("puback", function() {
+            client.disconnect();
+          });
+        });
+      },
+
+      function(cb) {
+        opts.clean = true;
+        buildAndConnect(cb, opts, function(client, connack) {
+
+          // reconnection sessionPresent must be false, it is clean
+          expect(connack.sessionPresent).to.be.eql(false);
+
+          client.on("publish", function(packet) {
+            cb(new Error("unexpected publish"));
+          });
+
+          setTimeout(function(){
+            client.disconnect();
+          }, 1000);
         });
       }
     ], done);
@@ -1790,7 +2033,7 @@ module.exports = function(moscaSettings, createConnection) {
       });
     }
 
-    async.waterfall([
+    steed.waterfall([
       step1, step2, step3,
       // two times!
       step1, step2, step3
@@ -1819,7 +2062,7 @@ module.exports = function(moscaSettings, createConnection) {
     opts.clean = false;
     opts.keepalive = 0;
 
-    async.series([
+    steed.series([
 
       function(cb) {
         buildAndConnect(cb, opts, function(client) {
@@ -1864,7 +2107,7 @@ module.exports = function(moscaSettings, createConnection) {
             client.disconnect();
 
             expect(packet.topic).to.eql("hello");
-            expect(packet.payload).to.eql("world");
+            expect(packet.payload.toString()).to.eql("world");
             expect(packet.qos).to.eql(1);
           });
         });
@@ -1879,7 +2122,7 @@ module.exports = function(moscaSettings, createConnection) {
     opts.clean = false;
     opts.keepalive = 0;
 
-    async.series([
+    steed.series([
 
       function(cb) {
         buildAndConnect(cb, opts, function(client) {
@@ -1924,7 +2167,7 @@ module.exports = function(moscaSettings, createConnection) {
             client.disconnect();
 
             expect(packet.topic).to.eql("hello");
-            expect(packet.payload).to.eql("world");
+            expect(packet.payload.toString()).to.eql("world");
             expect(packet.qos).to.eql(1);
           });
         });
@@ -2047,7 +2290,7 @@ module.exports = function(moscaSettings, createConnection) {
 
       client.on("publish", function(packet) {
         expect(packet).to.have.property("topic", "hello");
-        expect(packet).to.have.property("payload", "world");
+        expect(packet.payload.toString()).to.equal("world");
         expect(packet).to.have.property("qos", 1);
         client.disconnect();
       });

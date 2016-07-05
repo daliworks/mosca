@@ -1,15 +1,14 @@
-var mqtt = require("mows");
-var async = require("async");
+var steed = require("steed");
 var ascoltatori = require("ascoltatori");
 var abstractServerTests = require("./abstract_server");
+var createConnection = require("./helpers/createWebsocketConnection");
 var request = require('supertest');
 
 var moscaSettings = function() {
   var settings = {
     stats: false,
     logger: {
-      childOf: globalLogger,
-      level: 60
+      level: "error"
     },
     persistence: {
       factory: mosca.persistence.Memory
@@ -32,7 +31,7 @@ var moscaSettings = function() {
 };
 
 describe("mosca.Server - Websocket", function() {
-  abstractServerTests(moscaSettings, mqtt.createConnection);
+  abstractServerTests(moscaSettings, createConnection);
 
   it("should retrieve a static file", function(done) {
     var curPort = nextPort() - 1;

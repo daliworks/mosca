@@ -1,6 +1,37 @@
 History
 =======
 
+## 0.29.0
+
+* Effectively support offline packets expiration #235 #236 by @mazhack.
+
+## 0.28.2
+
+* Do not store qos 0 packets for offline delivery #229 #230 by @mazhack.
+* Added session present flag on CONNACK #231 by @mazhack).
+
+## 0.28.1
+
+* Fixed "stats should not be published by default in embedded mode"
+  https://github.com/mcollina/mosca/pull/217 by @stefanobaghino.
+* ASCII art on start.
+
+## 0.28.0
+
+* Updated dependencies.
+* node 0.12 support.
+
+## 0.27.1
+
+* Upgraded browserify to v8.1.1.
+
+## 0.27.0
+
+* Updated MQTT.js to 1.0.0.
+* Extracted
+  [pbkdf2-password](https://www.npmjs.com/package/pbkdf2-password).
+* Updated Dockerfile.
+
 ## 0.26.2
 
 * Improved error handling in case of database errors.

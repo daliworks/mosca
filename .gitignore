@@ -21,3 +21,8 @@ mosquitto.db
 coverage/
 public/*
 data/
+db
+
+profile-*
+.__*
+.idea
