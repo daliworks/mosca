@@ -19,6 +19,7 @@ var moscaSetting = {
         { type: "https", port: 3001, bundle: true, credentials: { keyPath: SECURE_KEY, certPath: SECURE_CERT } }
     ],
     stats: false,
+    onQoS2publish: 'noack', // can set to 'disconnect', or to 'dropToQoS1' if using a client which will eat puback for QOS 2; e.g. mqtt.js
 
     logger: { name: 'MoscaServer', level: 'debug' },
 
@@ -35,11 +36,20 @@ var authenticate = function (client, username, password, callback) {
 }
 
 var authorizePublish = function (client, topic, payload, callback) {
-    callback(null, true);
+    var auth = true;
+    // set auth to :
+    //  true to allow 
+    //  false to deny and disconnect
+    //  'ignore' to puback but not publish msg.
+    callback(null, auth);
 }
 
 var authorizeSubscribe = function (client, topic, callback) {
-    callback(null, true);
+    var auth = true;
+    // set auth to :
+    //  true to allow
+    //  false to deny 
+    callback(null, auth);
 }
 
 var server = new mosca.Server(moscaSetting);

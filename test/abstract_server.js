@@ -33,14 +33,18 @@ module.exports = function(moscaSettings, createConnection) {
   function buildClient(done, callback) {
     var client = createConnection(settings.port, settings.host);
 
-    client.once('error', done);
-    client.stream.once('close', function() {
-      setImmediate(done);
-    });
+    client.once('error', finish);
+    client.stream.once('close', finish);
 
     client.on("connected", function() {
       callback(client);
     });
+
+    function finish () {
+      client.removeListener('error', finish);
+      client.stream.removeListener('close', finish);
+      done();
+    }
   }
 
   function buildAndConnect(done, opts, callback) {
@@ -848,6 +852,243 @@ module.exports = function(moscaSettings, createConnection) {
     });
   });
 
+  
+  // tests for local authorizePublish, with 'ignore' return
+  var authorizePublishIgnore = function(client, topic, payload, callback) {
+    var auth = true;
+    if (topic === 'authignore'){
+        auth = 'ignore';
+    }
+    if (topic === 'authfalse'){
+        auth = false;
+    }
+    
+    callback(null, auth);
+  }
+  
+  it("should not call onPublished on publish to topic where auth='ignore'", function(done) {
+    var onPublishedCalled = false;
+    var clientId;
+    var count = 0;
+
+    instance.authorizePublish = authorizePublishIgnore;
+    instance.published = function(packet, serverClient, callback) {
+      onPublishedCalled = true;
+      expect(packet.topic).to.be.equal("hello");
+      expect(packet.payload.toString().toString()).to.be.equal("some data");
+      expect(serverClient.id).to.be.equal(clientId);
+
+      callback();
+    };
+
+    buildAndConnect(done, function(client) {
+      clientId = client.opts.clientId;
+
+      client.publish({
+        messageId: 42,
+        topic: "authignore",
+        payload: "some data to ignore",
+        qos: 1
+      });
+      client.publish({
+        messageId: 43,
+        topic: "hello",
+        payload: "some data",
+        qos: 1
+      });
+
+      // auth='ignore' should puback, but not publish
+      client.on("puback", function() {
+        count++
+        // on second call, onPublished should be true
+        if(count === 2){
+            expect(onPublishedCalled).to.eql(true);
+            client.disconnect();
+        }
+      });
+    });
+  });
+  
+  it("should disconnect client on publish to topic where auth=false", function(done) {
+    var onPublishedCalled = false;
+    var clientId;
+    var count = 0;
+    var timer;
+
+    instance.authorizePublish = authorizePublishIgnore;
+    instance.published = function(packet, serverClient, callback) {
+      onPublishedCalled = true;
+      expect(packet.topic).to.be.equal("should not have published");
+      callback();
+    };
+
+    buildAndConnect(done, function(client) {
+      clientId = client.opts.clientId;
+
+      client.publish({
+        messageId: 42,
+        topic: "authfalse",
+        payload: "some data to cause close",
+        qos: 1
+      });
+
+      // if after 2 seconds, we've not closed
+      timer = setTimeout(function(){
+        var test = false;
+        expect(count).to.eql(0);
+        expect(test).to.eql(true);
+        client.disconnect();
+      }, 2000);
+      
+      // auth=false should NOT puback
+      client.on("puback", function() {
+        expect(onPublishedCalled).to.eql(false);
+        count++;
+        expect(count).to.eql(0);
+        client.disconnect();
+      });
+      client.on("close", function() {
+        expect(onPublishedCalled).to.eql(false);
+        expect(count).to.eql(0);
+        client.disconnect();
+        clearTimeout(timer);
+      });
+    });
+  });
+
+  it("should by default not puback client publish to QOS 2", function(done) {
+    var onPublishedCalled = false;
+    var clientId;
+    var count = 0;
+    var timer;
+
+    instance.published = function(packet, serverClient, callback) {
+      onPublishedCalled = true;
+      expect(packet.topic).to.be.equal("testQOS2");
+      callback();
+    };
+
+    buildAndConnect(done, function(client) {
+      clientId = client.opts.clientId;
+
+      client.publish({
+        messageId: 42,
+        topic: "testQOS2",
+        payload: "publish expected",
+        qos: 2
+      });
+
+      // allow 1 second to hear puback
+      timer = setTimeout(function(){
+        client.disconnect();
+      }, 1000);
+      
+      // default QOS 2 should NOT puback
+      client.on("puback", function() {
+        count++;
+        //expect(count).to.eql(1);
+        client.disconnect();
+      });
+      client.on("close", function() {
+        expect(count).to.eql(0);
+        client.disconnect();
+        clearTimeout(timer);
+      });
+    });
+  });
+
+  
+  it("should optionally (onQoS2publish='dropToQoS1') puback client publish to QOS 2", function(done) {
+    var onPublishedCalled = false;
+    var clientId;
+    var count = 0;
+    var timer;
+
+    instance.onQoS2publish = 'dropToQoS1';
+    instance.published = function(packet, serverClient, callback) {
+      onPublishedCalled = true;
+      expect(packet.topic).to.be.equal("testQOS2");
+      callback();
+    };
+
+    buildAndConnect(done, function(client) {
+      clientId = client.opts.clientId;
+
+      client.publish({
+        messageId: 42,
+        topic: "testQOS2",
+        payload: "publish expected",
+        qos: 2
+      });
+
+      // allow 1 second to hear puback
+      timer = setTimeout(function(){
+        client.disconnect();
+      }, 1000);
+      
+      // with maxqos=1, QOS 2 should puback
+      client.on("puback", function() {
+        count++;
+        expect(count).to.eql(1);
+        client.disconnect();
+      });
+      client.on("close", function() {
+        expect(count).to.eql(1);
+        client.disconnect();
+        clearTimeout(timer);
+      });
+    });
+  });
+
+it("should optionally (onQoS2publish='disconnect') disconnect client on publish of QOS2 message", function(done) {
+    var onPublishedCalled = false;
+    var clientId;
+    var count = 0;
+    var timer;
+
+    instance.onQoS2publish = 'disconnect';
+    instance.published = function(packet, serverClient, callback) {
+      onPublishedCalled = true;
+      expect(packet.topic).to.be.equal("should not have published");
+      callback();
+    };
+
+    buildAndConnect(done, function(client) {
+      clientId = client.opts.clientId;
+
+      client.publish({
+        messageId: 42,
+        topic: "QOS2Test",
+        payload: "some data to cause close",
+        qos: 2
+      });
+
+      // if after 2 seconds, we've not closed
+      timer = setTimeout(function(){
+        var test = false;
+        expect(count).to.eql(0);
+        expect(test).to.eql(true);
+        client.disconnect();
+      }, 2000);
+      
+      // onQoS2publish = 'disconnect' should NOT puback
+      client.on("puback", function() {
+        expect(onPublishedCalled).to.eql(false);
+        count++;
+        expect(count).to.eql(0);
+        client.disconnect();
+      });
+      client.on("close", function() {
+        expect(onPublishedCalled).to.eql(false);
+        expect(count).to.eql(0);
+        client.disconnect();
+        clearTimeout(timer);
+      });
+    });
+  });
+
+
+  
   it("should emit an event when a new client is connected", function(done) {
     buildClient(done, function(client) {
 
